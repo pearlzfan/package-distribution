@@ -1,0 +1,125 @@
+
+---
+- name: Download package to Linux and Windows hosts
+  hosts: linux:windows
+  gather_facts: true
+
+  vars:
+    jumphosts:
+      JH1: "10.10.1.11"
+      JH2: "10.10.1.12"
+      JH3: "10.10.1.13"
+      JH4: "10.10.1.14"
+      JH5: "10.10.1.15"
+
+    jumphost_http_port: 8080
+
+    jumphost_ip: "{{ jumphosts[jump_host] }}"
+    package_url: "http://{{ jumphost_ip }}:{{ jumphost_http_port }}{{ package_name }}"
+
+    linux_destination: /tmp/packages
+    windows_destination: 'C:\Temp\Packages'
+
+  tasks:
+    - name: Validate selected jumphost
+      ansible.builtin.assert:
+        that:
+          - jump_host is defined
+          - jump_host in jumphosts
+        fail_msg: "Invalid jumphost selected in Survey."
+
+    - name: Validate package path
+      ansible.builtin.assert:
+        that:
+          - package_name is defined
+          - package_name | length > 0
+          - package_name.startswith('/')
+        fail_msg: "package_name must be an absolute URL path, e.g. /package/7zip.exe"
+
+    - name: Check package availability on selected jumphost
+      ansible.builtin.uri:
+        url: "{{ package_url }}"
+        method: HEAD
+        status_code: [200, 404]
+        return_content: false
+        timeout: 30
+      delegate_to: localhost
+      run_once: true
+      register: package_check
+
+    - name: Stop if package does not exist
+      ansible.builtin.fail:
+        msg: "no such file in repository on {{ jump_host }}"
+      when: package_check.status == 404
+      run_once: true
+
+    - name: Create destination directory on Linux
+      ansible.builtin.file:
+        path: "{{ linux_destination }}"
+        state: directory
+        mode: "0755"
+      when: ansible_facts['system'] == 'Linux'
+      become: true
+
+    - name: Download package to Linux
+      ansible.builtin.get_url:
+        url: "{{ package_url }}"
+        dest: "{{ linux_destination }}/{{ package_name | basename }}"
+        mode: "0644"
+        timeout: 300
+        force: false
+      when: ansible_facts['system'] == 'Linux'
+      become: true
+
+    - name: Create destination directory on Windows
+      ansible.windows.win_file:
+        path: "{{ windows_destination }}"
+        state: directory
+      when: ansible_facts['os_family'] == 'Windows'
+
+    - name: Download package to Windows
+      ansible.windows.win_get_url:
+        url: "{{ package_url }}"
+        dest: '{{ windows_destination }}\{{ package_name | basename }}'
+        force: false
+      when: ansible_facts['os_family'] == 'Windows'
+
+    - name: Check package exists on Windows
+      ansible.windows.win_stat:
+        path: '{{ windows_destination }}\{{ package_name | basename }}'
+      register: windows_package_stat
+      when: ansible_facts['os_family'] == 'Windows'
+
+    - name: Check package exists on Linux
+      ansible.builtin.stat:
+        path: "{{ linux_destination }}/{{ package_name | basename }}"
+      register: linux_package_stat
+      when: ansible_facts['system'] == 'Linux'
+      become: true
+
+    - name: Fail if package is missing on Windows
+      ansible.builtin.assert:
+        that:
+          - windows_package_stat.stat.exists
+          - windows_package_stat.stat.isreg
+        fail_msg: >-
+          Package {{ package_name | basename }} was not found
+          in {{ windows_destination }} on {{ inventory_hostname }}.
+      when: ansible_facts['os_family'] == 'Windows'
+
+    - name: Fail if package is missing on Linux
+      ansible.builtin.assert:
+        that:
+          - linux_package_stat.stat.exists
+          - linux_package_stat.stat.isreg
+        fail_msg: >-
+          Package {{ package_name | basename }} was not found
+          in {{ linux_destination }} on {{ inventory_hostname }}.
+      when: ansible_facts['system'] == 'Linux'
+
+    - name: Display package copy confirmation
+      ansible.builtin.debug:
+        msg: >-
+          Package {{ package_name | basename }} has been copied to
+          {{ windows_destination if ansible_facts['os_family'] == 'Windows' else linux_destination }}
+          from {{ jump_host }}.
